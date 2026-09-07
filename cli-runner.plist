@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS LaunchAgent for cli-runner.
+
+  Install (as the user whose CLI auth lives in ~):
+    # edit CLI_TOKEN (must match the backend's HOST_CLI_TOKEN),
+    # WorkingDirectory and the venv path below, then:
+    cp cli-runner.plist ~/Library/LaunchAgents/com.cli-runner.plist
+    launchctl load -w ~/Library/LaunchAgents/com.cli-runner.plist
+    launchctl list | grep cli-runner
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.cli-runner.plist
+    rm ~/Library/LaunchAgents/com.cli-runner.plist
+
+  Notes:
+  - RunAtLoad starts the service when the user logs in; KeepAlive restarts it
+    whenever the process exits. A LaunchAgent (not LaunchDaemon) is correct
+    here because the cmd/agy credentials live under the logged-in user's home.
+  - The Path env var must include the npm bin dir so the service can find `cmd`.
+  - Change the .venv/bin/uvicorn path below if the project is installed
+    somewhere other than ~/app/cli-runner.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cli-runner</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>exec /Users/YOUR_USER/app/cli-runner/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8899</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USER/app/cli-runner</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLI_TOKEN</key>
+        <string>CHANGE_ME_SAME_AS_BACKEND_HOST_CLI_TOKEN</string>
+        <key>CLI_WORKSPACE_DIR</key>
+        <string>/tmp/cli-runner-workspace</string>
+        <key>CLI_MAX_CONCURRENCY</key>
+        <string>5</string>
+        <key>CLI_DEFAULT_TIMEOUT</key>
+        <string>1800</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/cli-runner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/cli-runner.log</string>
+</dict>
+</plist>

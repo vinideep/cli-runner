@@ -1,0 +1,62 @@
+# systemd unit for the cli-runner host service.
+#
+# Install (as root):
+#   cp cli-runner.service /etc/systemd/system/
+#   # edit the Environment= lines below (CLI_TOKEN must match the backend's HOST_CLI_TOKEN)
+#   systemctl daemon-reload
+#   systemctl enable --now cli-runner
+#   systemctl status cli-runner
+#   curl -s http://127.0.0.1:8899/health                                    # from the host itself
+#   docker exec <backend-container> curl -s http://host.docker.internal:8899/health  # from the container
+#   # `host.docker.internal` only resolves INSIDE a container with the
+#   # extra_hosts:host-gateway mapping (docker-compose.yml) — it does not
+#   # resolve on the host itself, so don't curl that hostname from a host shell.
+#
+# Runs as root because the cmd/agy CLI auth lives under /root.
+#
+# ── Security: this binds 0.0.0.0, not just loopback ─────────────────────────
+# Docker's host-gateway mechanism means the backend container reaches this
+# service via the host's real network interface, not 127.0.0.1 — so it MUST
+# bind 0.0.0.0 (see --host below) to accept that connection. That also means
+# it's reachable from anywhere that can route to this host's IP, not just the
+# Docker bridge — the X-CLI-Token check is the ONLY access control, there is no
+# loopback boundary backing it up. Firewall port 8899 to the Docker
+# bridge/gateway range only (e.g. `ufw allow from 172.16.0.0/12 to any port
+# 8899` — adjust to your actual docker network CIDR) so it isn't reachable from
+# the public internet or LAN even if the token ever leaks.
+
+[Unit]
+Description=cli-runner — host CLI bridge (cmd/agy)
+After=network.target
+
+[Service]
+Type=simple
+# MUST be the same OS user that authenticated the CLIs (cmd login / agy Google
+# OAuth). That auth lives under the user's home, so HOME must point there — the
+# subprocess reads its credentials from HOME, and the venv has no bearing on it.
+User=root
+Environment=HOME=/root
+WorkingDirectory=/path/to/cli-runner
+# CLI_TOKEN MUST equal the backend's HOST_CLI_TOKEN.
+Environment=CLI_TOKEN=CHANGE_ME_SAME_AS_BACKEND_HOST_CLI_TOKEN
+Environment=CLI_WORKSPACE_DIR=/path/to/cli-runner-workspace
+Environment=CMD_BIN=cmd
+Environment=AGY_BIN=/root/.local/bin/agy
+Environment=CLI_MAX_CONCURRENCY=5
+Environment=CLI_DEFAULT_TIMEOUT=1800
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+# NOTE: a 203/EXEC crash-loop from systemd means THIS path doesn't exist —
+# create the venv first (python3 -m venv .venv && .venv/bin/pip install -r
+# requirements.txt) and make sure the directory matches where you copied the
+# project (observed live: restart counter hit 82 before the path was fixed).
+ExecStart=/path/to/cli-runner/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8899
+Restart=on-failure
+RestartSec=5
+# A restart while a CLI run is in flight would otherwise wait systemd's default
+# 90s for uvicorn to drain the request, then SIGKILL (observed live). Give it a
+# short grace, then kill the whole group (uvicorn + any node/cmd children).
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
