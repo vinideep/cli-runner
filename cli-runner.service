@@ -1,8 +1,11 @@
 # systemd unit for the cli-runner host service.
 #
-# Install (as root):
+# Install (as root, on the production host):
+#   install -d -m 0750 /etc/cli-runner
+#   # Create /etc/cli-runner/cli-runner.env out of band with:
+#   #   CLI_TOKEN=<same secret as backend HOST_CLI_TOKEN>
+#   # Keep that file root-owned (0600); never commit or print it.
 #   cp cli-runner.service /etc/systemd/system/
-#   # edit the Environment= lines below (CLI_TOKEN must match the backend's HOST_CLI_TOKEN)
 #   systemctl daemon-reload
 #   systemctl enable --now cli-runner
 #   systemctl status cli-runner
@@ -36,20 +39,19 @@ Type=simple
 # subprocess reads its credentials from HOME, and the venv has no bearing on it.
 User=root
 Environment=HOME=/root
-WorkingDirectory=/path/to/cli-runner
-# CLI_TOKEN MUST equal the backend's HOST_CLI_TOKEN.
-Environment=CLI_TOKEN=CHANGE_ME_SAME_AS_BACKEND_HOST_CLI_TOKEN
-Environment=CLI_WORKSPACE_DIR=/path/to/cli-runner-workspace
+# Production host layout is /home/deepi/app/cli-runner. Keep the token in a
+# root-owned file so a service update cannot silently replace it with a
+# placeholder or expose it in the unit source.
+WorkingDirectory=/home/deepi/app/cli-runner
+EnvironmentFile=-/etc/cli-runner/cli-runner.env
+Environment=CLI_WORKSPACE_DIR=/home/deepi/app/cli-runner-workspace
 Environment=CMD_BIN=cmd
 Environment=AGY_BIN=/root/.local/bin/agy
 Environment=CLI_MAX_CONCURRENCY=5
 Environment=CLI_DEFAULT_TIMEOUT=1800
 Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
-# NOTE: a 203/EXEC crash-loop from systemd means THIS path doesn't exist —
-# create the venv first (python3 -m venv .venv && .venv/bin/pip install -r
-# requirements.txt) and make sure the directory matches where you copied the
-# project (observed live: restart counter hit 82 before the path was fixed).
-ExecStart=/path/to/cli-runner/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8899
+# NOTE: a 203/EXEC crash-loop means the venv path is wrong or incomplete.
+ExecStart=/home/deepi/app/cli-runner/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8899
 Restart=on-failure
 RestartSec=5
 # A restart while a CLI run is in flight would otherwise wait systemd's default

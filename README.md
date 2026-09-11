@@ -113,6 +113,14 @@ source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+For the Linux production unit, install the repository at
+`/home/deepi/app/cli-runner` (or update the paths in the unit before copying
+it). Create `/etc/cli-runner/cli-runner.env` as root with mode `0600` and set
+`CLI_TOKEN` to the same value as the backend `HOST_CLI_TOKEN`; keep this file
+outside Git and never print it in diagnostics. The unit loads that file via
+`EnvironmentFile`, so a restart cannot revert the token to a committed
+placeholder.
+
 Ensure your CLIs are authenticated on the host:
 ```bash
 cmd status    # Command Code CLI
