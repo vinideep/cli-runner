@@ -49,6 +49,7 @@ def test_health(client):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
+    assert body["auth_configured"] is True
     assert body["in_flight"] == 0
     assert body["waiting"] == 0
     assert body["max_concurrency"] >= 1
@@ -390,4 +391,3 @@ def test_route_unauthorized(client):
 def test_stream_unauthorized(client):
     r = client.post("/run/stream", json={"provider": "cmdcode", "prompt": "test"})
     assert r.status_code == 401
-

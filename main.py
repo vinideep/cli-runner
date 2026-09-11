@@ -463,6 +463,10 @@ async def _execute_cli(
 async def health() -> dict:
     return {
         "ok": True,
+        # Safe readiness fact: never expose the token, only whether /run can
+        # authenticate callers. This lets the backend distinguish a reachable
+        # but unusable runner from a fully configured one.
+        "auth_configured": bool(CLI_TOKEN),
         "cmd_found": shutil.which(CMD_BIN) is not None,
         "agy_found": shutil.which(AGY_BIN) is not None or os.path.exists(AGY_BIN),
         "workspace": WORKSPACE_DIR,
