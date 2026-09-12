@@ -479,6 +479,16 @@ async def health() -> dict:
     }
 
 
+@app.get("/ready")
+async def readiness(
+    request: Request,
+    x_cli_token: str = Header(default="", alias="X-CLI-Token"),
+) -> dict:
+    """Prove caller/runner shared-secret agreement without executing a CLI."""
+    _verify_token(x_cli_token, request)
+    return {"ready": True, **await health()}
+
+
 @app.get("/metrics", response_class=PlainTextResponse)
 async def metrics() -> str:
     lines = [

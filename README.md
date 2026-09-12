@@ -96,7 +96,7 @@ For detailed technical deep-dives:
   - Constant-time token verification (`secrets.compare_digest`).
   - CIDR/IP allowlist filtering (`CLI_ALLOWED_IPS`).
   - Max execution timeouts and output truncation guards.
-- **Observability**: Exposes standard **Prometheus metrics (`/metrics`)** and live queue depth gauges (`/health`).
+- **Observability**: Exposes standard **Prometheus metrics (`/metrics`)** and live queue depth gauges (`/health`). Authenticated `/ready` proves the backend's shared token matches before any CLI prompt is launched.
 - **Cross-Platform Host Daemons**: Native auto-restart and boot scripts for Linux (`systemd`), macOS (`launchd`), and Windows (`Task Scheduler`).
 
 ---
@@ -143,6 +143,15 @@ python main.py
 ---
 
 ## API Endpoints
+
+### `GET /ready` (Authenticated Readiness)
+Prove the caller and runner share the same `CLI_TOKEN` without launching a CLI
+process or consuming a subscription turn:
+
+```bash
+curl -s http://127.0.0.1:8899/ready \
+  -H "X-CLI-Token: $CLI_TOKEN" | jq
+```
 
 ### `POST /run` (Synchronous Execution)
 Execute an agent prompt and await the structured result.

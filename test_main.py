@@ -57,6 +57,31 @@ def test_health(client):
     assert "queued_jobs" in body
 
 
+def test_ready_requires_matching_shared_token(client):
+    response = client.get("/ready", headers={"X-CLI-Token": "secret"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is True
+    assert body["auth_configured"] is True
+
+
+def test_ready_rejects_missing_or_wrong_shared_token(client):
+    assert client.get("/ready").status_code == 401
+    assert client.get("/ready", headers={"X-CLI-Token": "wrong"}).status_code == 401
+
+
+def test_ready_reports_unconfigured_runner(monkeypatch, client):
+    # The fixture reloads the application module so environment overrides do
+    # not leak between clients; patch the module actually backing this app.
+    monkeypatch.setattr(sys.modules["main"], "CLI_TOKEN", "")
+
+    response = client.get("/ready", headers={"X-CLI-Token": "secret"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Service has no CLI_TOKEN configured."
+
+
 def test_run_returns_cli_stdout(client):
     r = client.post(
         "/run",
