@@ -17,6 +17,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 import main  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _allow_testclient_address(monkeypatch):
+    # TestClient reports the client host as "testclient", which is not an IP;
+    # tests that exercise the allowlist set their own value.
+    monkeypatch.setenv("CLI_ALLOWED_IPS", "*")
+    monkeypatch.delenv("CLI_AGENT_TOOLS", raising=False)
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     # A stub binary that ignores its args and prints a known JSON array
@@ -35,7 +43,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CMD_BIN", str(stub))
     monkeypatch.setenv("AGY_BIN", str(stub))
     monkeypatch.setenv("CLI_WORKSPACE_DIR", str(tmp_path / "ws"))
-    monkeypatch.setenv("CLI_ALLOWED_IPS", "")
 
     for mod in ("main",):
         sys.modules.pop(mod, None)
@@ -147,6 +154,46 @@ def test_effort_not_added_by_default():
     for kind in ("cmd", "agy"):
         argv = main._build_argv(kind, "prompt", model=None, effort=None)
         assert "--effort" not in argv
+
+
+def test_agent_tools_are_not_auto_approved_by_default():
+    sys.modules.pop("main", None)
+    import main
+    cmd_argv = main._build_argv("cmd", "prompt", model=None, effort=None)
+    agy_argv = main._build_argv("agy", "prompt", model=None, effort=None)
+    assert "--yolo" not in cmd_argv
+    assert "--dangerously-skip-permissions" not in agy_argv
+    assert agy_argv[agy_argv.index("--mode") + 1] == "plan"
+    assert "--sandbox" in agy_argv
+
+
+def test_agent_tools_auto_approval_is_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("CLI_AGENT_TOOLS", "1")
+    sys.modules.pop("main", None)
+    import main
+    assert "--yolo" in main._build_argv("cmd", "prompt", model=None, effort=None)
+    agy_argv = main._build_argv("agy", "prompt", model=None, effort=None)
+    assert "--dangerously-skip-permissions" in agy_argv
+    assert "--mode" not in agy_argv
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "172.17.0.2", "172.18.5.9", "10.1.2.3", "192.168.1.20", "::1"])
+def test_default_allowlist_accepts_loopback_and_private_clients(monkeypatch, host):
+    monkeypatch.setenv("CLI_ALLOWED_IPS", "")
+    sys.modules.pop("main", None)
+    import main
+    main._check_ip_allowed(host)
+
+
+@pytest.mark.parametrize("host", ["8.8.8.8", "80.225.219.202", "100.64.1.1", "testclient", None])
+def test_default_allowlist_rejects_public_and_unknown_clients(monkeypatch, host):
+    monkeypatch.setenv("CLI_ALLOWED_IPS", "")
+    sys.modules.pop("main", None)
+    import main
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        main._check_ip_allowed(host)
+    assert exc.value.status_code == 403
 
 
 def test_invalid_effort_rejected(client):

@@ -50,7 +50,13 @@ _WINDOWS_WS = str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "cli-
 _DEFAULT_WORKSPACE = _WINDOWS_WS if IS_WINDOWS else "/tmp/cli-runner-workspace"
 
 CLI_TOKEN = os.environ.get("CLI_TOKEN", "").strip()
+# Empty = loopback/private networks only (the backend container reaches us over
+# the Docker bridge). "*" explicitly allows every client address.
 CLI_ALLOWED_IPS = os.environ.get("CLI_ALLOWED_IPS", "").strip()
+# Prompts carry third-party text (news headlines, filings). An agent that may
+# run tools on that text turns a prompt injection into a shell on this host,
+# so tool auto-approval is opt-in and off by default.
+CLI_AGENT_TOOLS = os.environ.get("CLI_AGENT_TOOLS", "").strip().lower() in {"1", "true", "yes"}
 WORKSPACE_DIR = os.environ.get("CLI_WORKSPACE_DIR", _DEFAULT_WORKSPACE)
 CMD_BIN = os.environ.get("CMD_BIN", _DEFAULT_CMD_BIN)
 AGY_BIN = os.environ.get("AGY_BIN", DEFAULT_AGY_BIN)
@@ -97,13 +103,24 @@ def _record_metric(provider: str, status: str, duration_s: float, error_reason: 
     _metrics["duration_seconds_count"][provider] = _metrics["duration_seconds_count"].get(provider, 0) + 1
 
 
+_DEFAULT_ALLOWED_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7")
+)
+
+
 def _check_ip_allowed(client_host: Optional[str]) -> None:
-    if not CLI_ALLOWED_IPS or not client_host:
+    if CLI_ALLOWED_IPS == "*":
         return
     try:
-        ip = ipaddress.ip_address(client_host)
+        ip = ipaddress.ip_address(client_host or "")
     except ValueError:
         raise HTTPException(status_code=403, detail="Invalid client IP address.")
+
+    if not CLI_ALLOWED_IPS:
+        if any(ip in net for net in _DEFAULT_ALLOWED_NETWORKS):
+            return
+        raise HTTPException(status_code=403, detail="Client IP not permitted by allowlist.")
 
     for entry in CLI_ALLOWED_IPS.split(","):
         entry = entry.strip()
@@ -121,8 +138,7 @@ def _check_ip_allowed(client_host: Optional[str]) -> None:
 
 
 def _verify_token(x_cli_token: str, request: Request) -> None:
-    if CLI_ALLOWED_IPS and request.client:
-        _check_ip_allowed(request.client.host)
+    _check_ip_allowed(request.client.host if request.client else None)
     if not CLI_TOKEN:
         raise HTTPException(status_code=503, detail="Service has no CLI_TOKEN configured.")
     if not secrets.compare_digest(x_cli_token or "", CLI_TOKEN):
@@ -268,14 +284,19 @@ def _validate_effort(effort: Optional[str]) -> Optional[str]:
 def _build_argv(kind: str, prompt: str, model: Optional[str],
                 effort: Optional[str]) -> list[str]:
     if kind == "cmd":
-        argv = [CMD_BIN, "-p", prompt, "--yolo", "--skip-onboarding",
+        argv = [CMD_BIN, "-p", prompt, "--skip-onboarding",
                 "--max-turns", str(CMD_MAX_TURNS)]
+        if CLI_AGENT_TOOLS:
+            argv.append("--yolo")
         if model:
             argv += ["--model", model]
         if effort:
             argv += ["--effort", effort]
         return argv
-    argv = [AGY_BIN, "--prompt", prompt, "--dangerously-skip-permissions"]
+    # Plan mode + sandbox: the agent answers but cannot run commands or edit
+    # files; unapproved tool requests come back as a plan instead of executing.
+    argv = [AGY_BIN, "--prompt", prompt]
+    argv += ["--dangerously-skip-permissions"] if CLI_AGENT_TOOLS else ["--mode", "plan", "--sandbox"]
     if model:
         argv += ["--model", model]
     if effort:
@@ -326,8 +347,11 @@ def _print_startup_banner() -> None:
     _log(f"│  workspace:   {WORKSPACE_DIR}")
     _log(f"│  bind:        {BIND_HOST}:{PORT}")
     _log(f"│  concurrency: {MAX_CONCURRENCY}")
-    if CLI_ALLOWED_IPS:
-        _log(f"│  ip_allow:    {CLI_ALLOWED_IPS}")
+    _log(f"│  ip_allow:    {CLI_ALLOWED_IPS or 'loopback + private networks'}")
+    _log(f"│  agent tools: {'AUTO-APPROVED' if CLI_AGENT_TOOLS else 'off (plan/sandbox)'}")
+    if CLI_AGENT_TOOLS and hasattr(os, "geteuid") and os.geteuid() == 0:
+        _log("│  WARNING: agent tools are auto-approved while running as root. A prompt "
+             "injection in any third-party text can run commands with full host access.")
     _log("└─ listening")
 
 

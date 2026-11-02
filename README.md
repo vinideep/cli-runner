@@ -94,7 +94,8 @@ For detailed technical deep-dives:
 - **Zero Conversation Reuse**: Enforces clean sessions per prompt, preventing conversational state drift and ensuring structured JSON responses.
 - **Enterprise Security**:
   - Constant-time token verification (`secrets.compare_digest`).
-  - CIDR/IP allowlist filtering (`CLI_ALLOWED_IPS`).
+  - CIDR/IP allowlist filtering (`CLI_ALLOWED_IPS`); unset means loopback + private networks only.
+  - Agent tool auto-approval is off by default (`agy` runs in plan + sandbox mode, `cmd` without `--yolo`). Prompts can contain third-party text, so a prompt injection must not be able to run commands on the host.
   - Max execution timeouts and output truncation guards.
 - **Observability**: Exposes standard **Prometheus metrics (`/metrics`)** and live queue depth gauges (`/health`). Authenticated `/ready` proves the backend's shared token matches before any CLI prompt is launched.
 - **Cross-Platform Host Daemons**: Native auto-restart and boot scripts for Linux (`systemd`), macOS (`launchd`), and Windows (`Task Scheduler`).
@@ -277,7 +278,8 @@ powershell -ExecutionPolicy Bypass -File .\install-windows-service.ps1
 | Variable | Default | Description |
 |---|---|---|
 | `CLI_TOKEN` | *(Required)* | Secret token expected in `X-CLI-Token` header. |
-| `CLI_ALLOWED_IPS` | `""` | Comma-separated list of allowed IPs / CIDRs (e.g. `127.0.0.1,172.17.0.0/16`). |
+| `CLI_ALLOWED_IPS` | `""` | Comma-separated list of allowed IPs / CIDRs (e.g. `127.0.0.1,172.17.0.0/16`). Empty = loopback and private networks only; `*` = any address. |
+| `CLI_AGENT_TOOLS` | unset | `1` auto-approves agent tools (`cmd --yolo`, `agy --dangerously-skip-permissions`). Leave unset for any prompt that contains third-party text. |
 | `CLI_MAX_CONCURRENCY` | `5` | Maximum concurrent agent CLI processes. |
 | `CLI_WORKSPACE_DIR` | OS-specific | Base path for isolated scratch directories. |
 | `CLI_DEFAULT_TIMEOUT` | `1800` | Per-task execution timeout in seconds. |
