@@ -26,7 +26,18 @@
 # loopback boundary backing it up. Firewall port 8899 to the Docker
 # bridge/gateway range only (e.g. `ufw allow from 172.16.0.0/12 to any port
 # 8899` — adjust to your actual docker network CIDR) so it isn't reachable from
-# the public internet or LAN even if the token ever leaks.
+# the public internet or LAN even if the token ever leaks. With CLI_ALLOWED_IPS
+# unset the runner itself also rejects every non-loopback, non-private client.
+#
+# ── Security: prompts carry third-party text ─────────────────────────────────
+# Global Cues and the stock advisor embed news headlines/summaries in prompts.
+# Agent tool auto-approval (--yolo / --dangerously-skip-permissions) is OFF
+# unless CLI_AGENT_TOOLS=1; keep it off. The sandbox directives below hide the
+# app secrets, data, backups and the Docker socket from the runner and every
+# CLI it starts, so even a tool call that slips through cannot read them.
+# After installing: `systemctl daemon-reload && systemctl restart cli-runner`,
+# then run one Global Cues brief. If a CLI fails on a read-only path, add only
+# that path to ReadWritePaths= rather than removing the protections.
 
 [Unit]
 Description=cli-runner — host CLI bridge (cmd/agy)
@@ -50,6 +61,10 @@ Environment=AGY_BIN=/root/.local/bin/agy
 Environment=CLI_MAX_CONCURRENCY=5
 Environment=CLI_DEFAULT_TIMEOUT=1800
 Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+InaccessiblePaths=-/home/deepi/app/.env -/home/deepi/app/data -/home/deepi/app/config -/home/deepi/app/logs -/home/deepi/app/backups -/home/deepi/.security-private -/home/deepi/.ssh -/var/run/docker.sock -/run/docker.sock
 # NOTE: a 203/EXEC crash-loop means the venv path is wrong or incomplete.
 ExecStart=/home/deepi/app/cli-runner/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8899
 Restart=on-failure
