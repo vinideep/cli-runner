@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import secrets
 import shutil
 import sys
@@ -66,6 +67,16 @@ BIND_HOST = os.environ.get("CLI_BIND_HOST", "0.0.0.0")
 PORT = int(os.environ.get("CLI_PORT", "8899"))
 MAX_CONCURRENCY = max(1, int(os.environ.get("CLI_MAX_CONCURRENCY", "5")))
 MAX_OUTPUT_CHARS = int(os.environ.get("CLI_MAX_OUTPUT_CHARS", "1000000"))
+MODELS_CACHE_TTL = float(os.environ.get("CLI_MODELS_CACHE_TTL", "600"))
+MODELS_LIST_TIMEOUT = float(os.environ.get("CLI_MODELS_LIST_TIMEOUT", "20"))
+
+_AGY_NO_OUTPUT_MARKER = "jetski: no output produced"
+_AGY_NO_TOOLS_PREAMBLE = (
+    "[Runner constraints: this is a single non-interactive completion. You have NO "
+    "tools: do not run commands, read or write files, browse, or search the web — any "
+    "tool call is denied and ends the turn with no answer. Answer directly and "
+    "completely from the information in this message alone.]"
+)
 
 _sem = asyncio.Semaphore(MAX_CONCURRENCY)
 
@@ -141,7 +152,14 @@ def _verify_token(x_cli_token: str, request: Request) -> None:
     _check_ip_allowed(request.client.host if request.client else None)
     if not CLI_TOKEN:
         raise HTTPException(status_code=503, detail="Service has no CLI_TOKEN configured.")
-    if not secrets.compare_digest(x_cli_token or "", CLI_TOKEN):
+    # Callers send either X-CLI-Token or a standard Authorization: Bearer header
+    # (the backend's model-list fetch uses the latter).
+    token = x_cli_token or ""
+    if not token:
+        scheme, _, value = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer":
+            token = value.strip()
+    if not secrets.compare_digest(token, CLI_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid or missing X-CLI-Token.")
 
 
@@ -293,10 +311,17 @@ def _build_argv(kind: str, prompt: str, model: Optional[str],
         if effort:
             argv += ["--effort", effort]
         return argv
-    # Plan mode + sandbox: the agent answers but cannot run commands or edit
-    # files; unapproved tool requests come back as a plan instead of executing.
-    argv = [AGY_BIN, "--prompt", prompt]
-    argv += ["--dangerously-skip-permissions"] if CLI_AGENT_TOOLS else ["--mode", "plan", "--sandbox"]
+    # Sandbox without auto-approval: headless print mode soft-denies any tool
+    # request and ends the turn with no answer. agy has no setting to withhold
+    # tools, so the preamble tells the model it has none (without it, analysis
+    # prompts reliably reach for RunCommand to fetch live data). Never add
+    # `--mode plan` here: plan mode always reaches for a command tool.
+    if CLI_AGENT_TOOLS:
+        argv = [AGY_BIN, "--prompt", prompt, "--disable-slash-commands",
+                "--dangerously-skip-permissions"]
+    else:
+        argv = [AGY_BIN, "--prompt", f"{_AGY_NO_TOOLS_PREAMBLE}\n\n{prompt}",
+                "--disable-slash-commands", "--sandbox"]
     if model:
         argv += ["--model", model]
     if effort:
@@ -348,7 +373,7 @@ def _print_startup_banner() -> None:
     _log(f"│  bind:        {BIND_HOST}:{PORT}")
     _log(f"│  concurrency: {MAX_CONCURRENCY}")
     _log(f"│  ip_allow:    {CLI_ALLOWED_IPS or 'loopback + private networks'}")
-    _log(f"│  agent tools: {'AUTO-APPROVED' if CLI_AGENT_TOOLS else 'off (plan/sandbox)'}")
+    _log(f"│  agent tools: {'AUTO-APPROVED' if CLI_AGENT_TOOLS else 'off (sandbox, denied headless)'}")
     if CLI_AGENT_TOOLS and hasattr(os, "geteuid") and os.geteuid() == 0:
         _log("│  WARNING: agent tools are auto-approved while running as root. A prompt "
              "injection in any third-party text can run commands with full host access.")
@@ -458,8 +483,11 @@ async def _execute_cli(
         output = output[:MAX_OUTPUT_CHARS] + "\n... [TRUNCATED DUE TO MAX OUTPUT LIMIT]"
 
     rc = proc.returncode
+    # agy exits 0 but prints only this notice when a denied tool left the turn
+    # without an answer; surfacing it as success hands the caller garbage.
+    agy_no_output = kind == "agy" and output.startswith(_AGY_NO_OUTPUT_MARKER)
 
-    if rc != 0 or not output:
+    if rc != 0 or not output or agy_no_output:
         _record_metric(kind, "failed", latency_ms / 1000.0, f"exit_{rc}")
         _log(f"[{job_id}] finished ok=False rc={rc} latency_ms={latency_ms}. Output: {output[:300]}")
         err_msg = output if len(output) <= 1000 else (output[:500] + "\n... [TRUNCATED] ...\n" + output[-500:])
@@ -480,6 +508,62 @@ async def _execute_cli(
         "latency_ms": latency_ms,
         "exit_code": rc,
     }
+
+
+# ── Model listing ────────────────────────────────────────────────────────────
+# {kind: (monotonic_ts, models)}; listing shells out to the CLI, so cache it.
+_models_cache: dict[str, tuple[float, list[str]]] = {}
+_models_locks: dict[str, asyncio.Lock] = {}
+_MODEL_ID_LINE = re.compile(r"^([A-Za-z0-9][\w.\-/:]*)(?:\t|\s{2,})")
+
+
+def _parse_model_list(output: str) -> list[str]:
+    """Model ids from `agy models` (id<TAB>label) or `cmd --list-models`
+    (id + column padding). Headers have no column gap after their first word."""
+    out: list[str] = []
+    for line in output.splitlines():
+        m = _MODEL_ID_LINE.match(line.strip("* \r"))
+        if m and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+async def _list_models(kind: str) -> list[str]:
+    cached = _models_cache.get(kind)
+    if cached and time.monotonic() - cached[0] < MODELS_CACHE_TTL:
+        return cached[1]
+    lock = _models_locks.setdefault(kind, asyncio.Lock())
+    async with lock:
+        cached = _models_cache.get(kind)
+        if cached and time.monotonic() - cached[0] < MODELS_CACHE_TTL:
+            return cached[1]
+        argv = [AGY_BIN, "models"] if kind == "agy" else [CMD_BIN, "--list-models"]
+        argv = _platform_windows_resolve(argv) if IS_WINDOWS else argv
+        models: list[str] = []
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=MODELS_LIST_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                stdout = b""
+            if proc.returncode == 0:
+                models = _parse_model_list(stdout.decode("utf-8", errors="replace"))
+            else:
+                _log(f"[models] {kind} list exit={proc.returncode}: "
+                     f"{stdout.decode('utf-8', errors='replace')[:200]}")
+        except FileNotFoundError as e:
+            _log(f"[models] {kind} binary not found: {e}")
+        if models:
+            _models_cache[kind] = (time.monotonic(), models)
+            return models
+        # Keep serving the last good list (even stale) when the CLI fails.
+        return cached[1] if cached else []
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -511,6 +595,19 @@ async def readiness(
     """Prove caller/runner shared-secret agreement without executing a CLI."""
     _verify_token(x_cli_token, request)
     return {"ready": True, **await health()}
+
+
+@app.get("/models")
+async def list_models(
+    request: Request,
+    provider: str = Query(default="agy"),
+    x_cli_token: str = Header(default="", alias="X-CLI-Token"),
+) -> dict:
+    _verify_token(x_cli_token, request)
+    kind = _resolve_bin(provider)
+    if kind == "auto":
+        raise HTTPException(status_code=400, detail="Pick a concrete provider (agy or cmdcode).")
+    return {"provider": kind, "models": await _list_models(kind)}
 
 
 @app.get("/metrics", response_class=PlainTextResponse)

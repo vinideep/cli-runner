@@ -95,7 +95,7 @@ For detailed technical deep-dives:
 - **Enterprise Security**:
   - Constant-time token verification (`secrets.compare_digest`).
   - CIDR/IP allowlist filtering (`CLI_ALLOWED_IPS`); unset means loopback + private networks only.
-  - Agent tool auto-approval is off by default (`agy` runs in plan + sandbox mode, `cmd` without `--yolo`). Prompts can contain third-party text, so a prompt injection must not be able to run commands on the host.
+  - Agent tool auto-approval is off by default (`agy` runs with `--sandbox` and a no-tools preamble, `cmd` without `--yolo`). Prompts can contain third-party text, so a prompt injection must not be able to run commands on the host. Headless `agy` soft-denies any tool call and ends the turn with no answer; the runner reports that as a failure. Never run `agy` with `--mode plan` here: it always reaches for a command tool.
   - Max execution timeouts and output truncation guards.
 - **Observability**: Exposes standard **Prometheus metrics (`/metrics`)** and live queue depth gauges (`/health`). Authenticated `/ready` proves the backend's shared token matches before any CLI prompt is launched.
 - **Cross-Platform Host Daemons**: Native auto-restart and boot scripts for Linux (`systemd`), macOS (`launchd`), and Windows (`Task Scheduler`).
@@ -152,6 +152,16 @@ process or consuming a subscription turn:
 ```bash
 curl -s http://127.0.0.1:8899/ready \
   -H "X-CLI-Token: $CLI_TOKEN" | jq
+```
+
+### `GET /models?provider=agy|cmdcode` (Authenticated Model List)
+Lists the model ids the host CLI offers (`agy models` / `cmd --list-models`),
+cached for `CLI_MODELS_CACHE_TTL` seconds. A failing CLI (e.g. expired login)
+returns the last good list, or `[]`.
+
+```bash
+curl -s "http://127.0.0.1:8899/models?provider=agy" \
+  -H "Authorization: Bearer $CLI_TOKEN" | jq
 ```
 
 ### `POST /run` (Synchronous Execution)
@@ -277,7 +287,7 @@ powershell -ExecutionPolicy Bypass -File .\install-windows-service.ps1
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLI_TOKEN` | *(Required)* | Secret token expected in `X-CLI-Token` header. |
+| `CLI_TOKEN` | *(Required)* | Secret token expected in the `X-CLI-Token` header (or `Authorization: Bearer`). |
 | `CLI_ALLOWED_IPS` | `""` | Comma-separated list of allowed IPs / CIDRs (e.g. `127.0.0.1,172.17.0.0/16`). Empty = loopback and private networks only; `*` = any address. |
 | `CLI_AGENT_TOOLS` | unset | `1` auto-approves agent tools (`cmd --yolo`, `agy --dangerously-skip-permissions`). Leave unset for any prompt that contains third-party text. |
 | `CLI_MAX_CONCURRENCY` | `5` | Maximum concurrent agent CLI processes. |
@@ -285,6 +295,8 @@ powershell -ExecutionPolicy Bypass -File .\install-windows-service.ps1
 | `CLI_DEFAULT_TIMEOUT` | `1800` | Per-task execution timeout in seconds. |
 | `CMD_MAX_TURNS` | `10` | Maximum agent conversational turns (`--max-turns`). |
 | `CLI_MAX_OUTPUT_CHARS`| `1000000` | Truncation ceiling for subprocess stdout. |
+| `CLI_MODELS_CACHE_TTL` | `600` | Seconds `GET /models` caches a CLI's model list. |
+| `CLI_MODELS_LIST_TIMEOUT` | `20` | Seconds to wait for `agy models` / `cmd --list-models`. |
 | `CLI_BIND_HOST` | `0.0.0.0` | Host bind address (requires firewalling in production). |
 | `CLI_PORT` | `8899` | Gateway listening port. |
 

@@ -163,8 +163,15 @@ def test_agent_tools_are_not_auto_approved_by_default():
     agy_argv = main._build_argv("agy", "prompt", model=None, effort=None)
     assert "--yolo" not in cmd_argv
     assert "--dangerously-skip-permissions" not in agy_argv
-    assert agy_argv[agy_argv.index("--mode") + 1] == "plan"
+    # Plan mode makes headless agy reach for a denied command tool and return
+    # no answer (or stall until --print-timeout); it must never be passed.
+    assert "--mode" not in agy_argv
     assert "--sandbox" in agy_argv
+    assert "--disable-slash-commands" in agy_argv
+    # Denied tools end the turn with no answer, so the model is told it has none.
+    prompt_arg = agy_argv[agy_argv.index("--prompt") + 1]
+    assert prompt_arg.startswith(main._AGY_NO_TOOLS_PREAMBLE)
+    assert prompt_arg.endswith("\n\nprompt")
 
 
 def test_agent_tools_auto_approval_is_explicit_opt_in(monkeypatch):
@@ -175,6 +182,7 @@ def test_agent_tools_auto_approval_is_explicit_opt_in(monkeypatch):
     agy_argv = main._build_argv("agy", "prompt", model=None, effort=None)
     assert "--dangerously-skip-permissions" in agy_argv
     assert "--mode" not in agy_argv
+    assert agy_argv[agy_argv.index("--prompt") + 1] == "prompt"
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "172.17.0.2", "172.18.5.9", "10.1.2.3", "192.168.1.20", "::1"])
@@ -463,3 +471,85 @@ def test_route_unauthorized(client):
 def test_stream_unauthorized(client):
     r = client.post("/run/stream", json={"provider": "cmdcode", "prompt": "test"})
     assert r.status_code == 401
+
+
+def test_bearer_token_accepted(client):
+    r = client.get("/ready", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200
+    assert client.get("/ready", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/ready", headers={"Authorization": "Basic secret"}).status_code == 401
+
+
+def test_agy_no_output_notice_is_a_failure(tmp_path, monkeypatch):
+    stub = tmp_path / "stub-agy"
+    stub.write_text(textwrap.dedent("""\
+        #!/usr/bin/env bash
+        echo 'jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.'
+    """))
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("CLI_TOKEN", "secret")
+    monkeypatch.setenv("AGY_BIN", str(stub))
+    monkeypatch.setenv("CLI_WORKSPACE_DIR", str(tmp_path / "ws"))
+    sys.modules.pop("main", None)
+    import main
+    r = TestClient(main.app).post(
+        "/run", headers={"X-CLI-Token": "secret"}, json={"provider": "agy", "prompt": "x"})
+    body = r.json()
+    assert body["ok"] is False
+    assert "no output produced" in body["error"]
+
+
+def test_parse_model_list_agy_and_cmd_formats():
+    agy = "Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\nclaude-sonnet-4-6\tClaude Sonnet 4.6\n"
+    assert main._parse_model_list(agy) == ["gemini-3.8-flash-high", "claude-sonnet-4-6"]
+    cmd = ("Available models  \u00b7  95 models\n\nOpen Source\n\n"
+           "deepseek/deepseek-v4-pro               hybrid reasoning\n"
+           "deepseek/deepseek-v4-flash             fast (default)\n")
+    assert main._parse_model_list(cmd) == ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"]
+
+
+def _models_client(tmp_path, monkeypatch, script):
+    stub = tmp_path / "stub-models"
+    stub.write_text("#!/usr/bin/env bash\n" + script)
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("CLI_TOKEN", "secret")
+    monkeypatch.setenv("AGY_BIN", str(stub))
+    monkeypatch.setenv("CMD_BIN", str(stub))
+    sys.modules.pop("main", None)
+    import main
+    return main, TestClient(main.app)
+
+
+def test_models_endpoint_lists_cli_models_with_bearer(tmp_path, monkeypatch):
+    calls = tmp_path / "calls"
+    main_mod, c = _models_client(tmp_path, monkeypatch, textwrap.dedent(f"""\
+        echo "$@" >> {calls}
+        if [ "$1" = models ]; then printf 'gemini-3.8-flash-medium\\tGemini\\n'; exit 0; fi
+        if [ "$1" = --list-models ]; then echo 'deepseek/deepseek-v4-flash   fast'; exit 0; fi
+        exit 2
+    """))
+    hdr = {"Authorization": "Bearer secret"}
+    r = c.get("/models", params={"provider": "agy"}, headers=hdr)
+    assert r.status_code == 200
+    assert r.json() == {"provider": "agy", "models": ["gemini-3.8-flash-medium"]}
+    r = c.get("/models", params={"provider": "cmdcode"}, headers=hdr)
+    assert r.json()["models"] == ["deepseek/deepseek-v4-flash"]
+    # Cached: a second agy call does not shell out again.
+    c.get("/models", params={"provider": "agy"}, headers=hdr)
+    assert calls.read_text().splitlines() == ["models", "--list-models"]
+
+
+def test_models_endpoint_requires_token_and_concrete_provider(tmp_path, monkeypatch):
+    _, c = _models_client(tmp_path, monkeypatch, "exit 0\n")
+    assert c.get("/models", params={"provider": "agy"}).status_code == 401
+    hdr = {"X-CLI-Token": "secret"}
+    assert c.get("/models", params={"provider": "auto"}, headers=hdr).status_code == 400
+    assert c.get("/models", params={"provider": "nope"}, headers=hdr).status_code == 400
+
+
+def test_models_endpoint_failed_cli_returns_empty_list(tmp_path, monkeypatch):
+    _, c = _models_client(tmp_path, monkeypatch,
+                          "echo 'Error: Authentication failed. Please run \"cmd login\" first.'; exit 3\n")
+    r = c.get("/models", params={"provider": "cmdcode"}, headers={"X-CLI-Token": "secret"})
+    assert r.status_code == 200
+    assert r.json()["models"] == []
